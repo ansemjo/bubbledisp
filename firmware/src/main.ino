@@ -1,6 +1,6 @@
 #include <Arduino.h>
+#include <Wire1.h>
 
-#include "countof.h"
 #include "pinout.h"
 #include "segments.h"
 
@@ -10,18 +10,17 @@
 volatile static uint8_t __isr_digit = 0;
 volatile static uint8_t display[CATHODES];
 
-//#define USE_TIMER_1
-
 // timer compare interrupt does multiplexing in the background
+//#define USE_TIMER_1
 #ifdef USE_TIMER_1
 ISR(TIMER1_COMPA_vect) {
 #else
 ISR(TIMER2_COMPA_vect) {
 #endif
-  segments(0);                      // disable all segments
-  digitn(__isr_digit);                 // turn on next digit
-  segments(display[__isr_digit]);  // turn on correct segments
-  __isr_digit = (__isr_digit + 1) % CATHODES;    // increment with overflow
+  segments(0);                     // all segments off
+  digitn(__isr_digit);             // turn on next digit
+  segments(display[__isr_digit]);  // light up correct segments
+  __isr_digit = (__isr_digit + 1) % CATHODES; // increment with overflow
 }
 
 void setup_display() {
@@ -58,16 +57,16 @@ void setup_display() {
 
 // ---------- SERIAL DATA INPUT ---------- //
 
-static char serialbuf[64];
 static char textbuf[64];
 static unsigned serialpos = 0;
 
+// just print serial input as text line without animation
+// newline clears everything and sets cursor to first digit
 void serialLine() {
-
   if (Serial.available() > 0) {
     char c = Serial.read();
     if (c == 0x0a) {
-      memcpy(textbuf, "_    \0", 6);
+      memcpy(textbuf, "     \0", 6);
       serialpos = 0;
     } else {
       if (serialpos < 5) {
@@ -81,32 +80,7 @@ void serialLine() {
       }
     }
   }
-
 }
-
-void serialRunner() {
-
-  if (Serial.available() > 0) {
-
-    char c = Serial.read();
-    if (c == 0x0a) {
-      serialbuf[serialpos] = 0x00;
-      memcpy(textbuf, serialbuf, serialpos + 1);
-      // for (unsigned i = 0; i <= serialpos; i++) {
-      //   textbuf[i] = serialbuf[i];
-      // }
-      reset_textrunner();
-      serialpos = 0;
-    } else {
-      serialbuf[serialpos] = c;
-      serialpos += 1;
-    }
-
-  }
-
-}
-
-
 
 // ---------- DISPLAY FUNCTIONS ---------- //
 
@@ -174,6 +148,8 @@ void reveal(volatile const char *str, const unsigned steplen) {
 
 // ---------- STATE MACHINES ---------- //
 
+
+
 enum modes { NOISE, DICE, ANTON, TEXT, _N_MODES_ };
 volatile static unsigned mode = TEXT;
 volatile static unsigned prevmode = mode;
@@ -181,16 +157,6 @@ volatile static bool config = false;
 
 enum todos { NONE, REF_INC, REF_DEC, MODE, CONFIG, ROLL };
 volatile static todos todo = NONE;
-
-// testing refresh rates with buttons
-void decreaseRefreshRate() {
-  unsigned t = OCR2A / 1.17;
-  OCR2A = (t < 1) ? 1 : t;
-}
-void increaseRefreshRate() {
-  unsigned t = OCR2A * 1.17 + 1;
-  OCR2A = (t > 255) ? 255 : t;
-}
 
 volatile unsigned __bh_debounce = 0;
 void buttonHandler() {
@@ -203,12 +169,6 @@ void buttonHandler() {
     if ((now - __bh_debounce) > 200) {
 
     switch (todo) {
-
-      case REF_INC: increaseRefreshRate();
-        break;
-
-      case REF_DEC: decreaseRefreshRate();
-        break;
 
       case CONFIG:
         config = !config;
@@ -293,75 +253,114 @@ void buttonHandler() {
 // ---------- MAIN ----------
 //
 
-void setup() {
+// slider switch for mode selection inputs
+#define SWITCH_I2C  20
+#define SWITCH_SPI  21
 
-  Serial.begin(57600);
-  Serial.println("Hello, World!");
+enum PROTOCOL { PROTOCOL_I2C, PROTOCOL_SPI, PROTOCOL_UART };
+static PROTOCOL proto;
+
+void setup() {
 
   // initialize pseudorandom number
   // THIS IS NOT CRYPTOGRAPHICALLY SECURE
   randomSeed(analogRead(0));
   
-  // setup background multiplexing
+  // begin background multiplexing
   setup_display();
 
-  // configure buttons as inputs
-  //pinMode(LEFT,  INPUT_PULLUP);
-  //pinMode(RIGHT, INPUT_PULLUP);
+  // setup input pins for mode selection
+  pinMode(SWITCH_I2C, INPUT_PULLUP);
+  pinMode(SWITCH_SPI, INPUT_PULLUP);
 
-  // the button debounce caps take a short moment to charge
-  //while (left() || right()) { };
+  // decide which mode to use on powerup
+  if (digitalRead(SWITCH_I2C) == LOW) {
 
-  // attach button handlers
-  //attachInterrupt(digitalPinToInterrupt(LEFT),  buttonHandler, CHANGE);
-  //attachInterrupt(digitalPinToInterrupt(RIGHT), buttonHandler, CHANGE);
+    proto = PROTOCOL_I2C;
+    text("  I2C");
+    delay(1000);
+    Wire1.begin(0x32);
+    text("Adr32");
+    delay(1000);
+    memcpy(textbuf, "00000\0", 6);
+    Wire1.onReceive(i2c_receiver);
 
-  text("HELLO");
+  } else if (digitalRead(SWITCH_SPI) == LOW) {
+
+    proto = PROTOCOL_SPI;
+    text("  SPI");
+
+  } else {
+
+    proto = PROTOCOL_UART;
+    text(" UART");
+    Serial.begin(57600);
+    Serial.println("bubbledisp ready");
+
+  }
+  delay(1000);
+
 
 }
 
+void i2c_receiver(int howmany) {
 
-void loop() {
-
-  if (mode != prevmode) {
-    reset_reveal();
-    reset_textrunner();
-    prevmode = mode;
-  }
-
-  if (config) {
-    char str[6];
-    snprintf(str, 6, "oc%3d", OCR2A);
-    text(str);
-    delay(10);
+  // wat?
+  if (howmany == 0) {
     return;
   }
 
-  switch (mode) {
+  // only one byte is usually a read address
+  static unsigned readaddr = 0;
+  if (howmany == 1) {
+    readaddr = Wire1.read();
+    return;
+  }
 
+  // otherwise decide by port what to do
+  char port = Wire1.read();
+  unsigned int pos = 0;
+  switch (port) {
+
+    // write text to display
     default:
-    case NOISE:
-      noise();
+    case 0x00:
+      // send HELLO:  i2ctransfer -y 8 w6@0x32 0x00 $(python -c 'for c in "HELLO": print(f"0x{ord(c):02x}")')
+      while (Wire1.available()) {
+        textbuf[pos] = Wire1.read();
+        pos += 1;
+      }
+      text(textbuf);
       break;
 
-    case DICE:
-      reveal(diceroll, 150);
+    // configure multiplexing rate
+    case 0x12:
+#ifdef USE_TIMER_1
+      OCR1A = Wire1.read();
+#else
+      OCR2A = Wire1.read();
+#endif
       break;
 
-    case ANTON:
-      reveal("Anton", 250);
-      break;
+  }
 
-    case TEXT:
+}
 
-      // textrunner("rEd ALErt! ");
+void loop() {
 
-      // serialRunner();
-      // textrunner(textbuf);
+  switch (proto) {
 
+    case PROTOCOL_UART:
       serialLine();
       text(textbuf);
+      break;
 
+    case PROTOCOL_I2C:
+      // handled in i2c_receiver
+      break;
+
+    default:
+      noise();
       break;
 
   }
