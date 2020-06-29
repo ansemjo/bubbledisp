@@ -6,9 +6,9 @@
 
 // ---------- BACKGROUND DISPLAY MULTIPLEXING ---------- //
 
-// counter and buffer for background refresh
-volatile static uint8_t __isr_digit = 0;
-volatile static uint8_t display[CATHODES];
+// buffers for display, raw and text
+static char display[CATHODES];
+static char textbuf[32];
 
 // timer compare interrupt does multiplexing in the background
 //#define USE_TIMER_1
@@ -17,10 +17,11 @@ ISR(TIMER1_COMPA_vect) {
 #else
 ISR(TIMER2_COMPA_vect) {
 #endif
+  volatile static unsigned digit = 0;
   segments(0);                     // all segments off
-  digitn(__isr_digit);             // turn on next digit
-  segments(display[__isr_digit]);  // light up correct segments
-  __isr_digit = (__isr_digit + 1) % CATHODES; // increment with overflow
+  digitn(digit);             // turn on next digit
+  segments(display[digit]);  // light up correct segments
+  digit = (digit + 1) % CATHODES; // increment with overflow
 }
 
 void setup_display() {
@@ -41,28 +42,26 @@ void setup_display() {
   TCCR1A = 0;
   TCCR1B = (1 << CS12) | (0 << CS11) | (1 << CS10) | (1 << WGM12); // run with /1024 prescaling, CTC mode
   TCNT1  = 0;
-  OCR1A  = 27; // 8 --> ca. 1 kHz, faster becomes darker, slower begins to flicker
+  OCR1A  = 8; // 8 --> ca. 1 kHz, faster becomes darker, slower begins to flicker
   TIMSK1 = (1 << OCIE1A); // activate comapre match A interrupt
 #else
   TCCR2A = (1 << WGM21); // clear timer on compare match (CTC)
   TCCR2B = (1 << CS22) | (1 << CS21) | (1 << CS20); // run with /1024 prescaling
   TCNT2  = 0;
-  OCR2A  = 27; // 8 --> ca. 1 kHz, faster becomes darker, slower begins to flicker
+  OCR2A  = 8; // 8 --> ca. 1 kHz, faster becomes darker, slower begins to flicker
   TIMSK2 = (1 << OCIE2A); // activate comapre match A interrupt
 #endif
   interrupts();
 
 }
 
-
 // ---------- SERIAL DATA INPUT ---------- //
-
-static char textbuf[64];
-static unsigned serialpos = 0;
 
 // just print serial input as text line without animation
 // newline clears everything and sets cursor to first digit
+// needs to be called periodically in loop()
 void serialLine() {
+  static unsigned serialpos = 0;
   if (Serial.available() > 0) {
     char c = Serial.read();
     if (c == 0x0a) {
@@ -85,13 +84,10 @@ void serialLine() {
 // ---------- DISPLAY FUNCTIONS ---------- //
 
 // fill the segments with random noise
-volatile unsigned __noise_delay = 50;
-volatile char diceroll[CATHODES+1];
 void noise() {
   for (unsigned i = 0; i < CATHODES; i++) {
     display[i] = random(255) & 0xfe; // mask the decimal dot
   }
-  delay(__noise_delay);
 }
 
 // display a string on the display
@@ -101,168 +97,22 @@ void text(volatile const char *str) {
   }
 }
 
-volatile unsigned __tr_offset = 0;
-volatile unsigned __tr_delay = 180;
-volatile bool __tr_freeze = false;
-void reset_textrunner() {
-  __tr_offset = 0;
-  __tr_freeze = false;
-}
-void textrunner(const char *str) {
-  static char __tr_buf[CATHODES];
-  if (__tr_freeze) return;
-  for (unsigned i = 0; i < CATHODES; i++) {
-    __tr_buf[i] = str[(i + __tr_offset) % strlen(str)];
-  }
-  text(__tr_buf);
-  __tr_offset = (__tr_offset + 1) % strlen(str);
-  delay(__tr_delay);
-}
 
-volatile bool __rv_done = false;
-volatile unsigned __rv_step = 0;
-volatile unsigned __rv_digit = 0;
-void reset_reveal() {
-  __rv_step = 0;
-  __rv_digit = 0;
-  __rv_done = false;
-}
-void reveal(volatile const char *str, const unsigned steplen) {
-  if (__rv_done) return;
-  if (__rv_step >= (steplen / (__noise_delay != 0 ? __noise_delay : 1))) {
-    if (__rv_digit == CATHODES) {
-      __rv_done = true;
-      return;
-    } else {
-      display[__rv_digit] = lookup(str[__rv_digit]);
-      __rv_digit++;
-      __rv_step = 0;
-    };
-  }
-  for (unsigned i = __rv_digit; i < CATHODES; i++) {
-    display[i] = random(255) & 0xfe;
-  }
-  __rv_step += 1;
-  delay(__noise_delay);
-}
-
-// ---------- STATE MACHINES ---------- //
-
-
-
-enum modes { NOISE, DICE, ANTON, TEXT, _N_MODES_ };
-volatile static unsigned mode = TEXT;
-volatile static unsigned prevmode = mode;
-volatile static bool config = false;
-
-enum todos { NONE, REF_INC, REF_DEC, MODE, CONFIG, ROLL };
-volatile static todos todo = NONE;
-
-volatile unsigned __bh_debounce = 0;
-void buttonHandler() {
-  bool l = false; //left();
-  bool r = false; //right();
-
-  if (!(l || r)) {
-
-    unsigned now = millis();
-    if ((now - __bh_debounce) > 200) {
-
-    switch (todo) {
-
-      case CONFIG:
-        config = !config;
-        reset_reveal();
-        reset_textrunner();
-        break;
-
-      case ROLL:
-        snprintf((char*)diceroll, 6, "%5lu", random(99999));
-        reset_reveal();
-        mode = DICE;
-        break;
-
-      case MODE:
-        switch (mode) {
-          case DICE:
-            mode = NOISE;
-            break;
-          case NOISE:
-            mode = NOISE + 2;
-            break;
-          default:
-            mode = (modes)((mode + 1) % _N_MODES_);
-            break;
-        };
-        break;
-
-      default:
-        break;
-
-    }
-
-    __bh_debounce = now;
-    }
-    todo = NONE;
-    return;
-  }
-
-  if (l && r) {
-    todo = CONFIG;
-    return;
-  }
-
-  if (!(todo == MODE || todo == CONFIG)) {
-
-    if (config) {
-      if (l) todo = REF_DEC;
-      if (r) todo = REF_INC;
-    } else {
-      switch (mode) {
-
-        case NOISE:
-          if (l) todo = MODE;
-          if (r) todo = ROLL;
-          break;
-
-        case DICE:
-          if (l) todo = MODE;
-          if (r) todo = ROLL;
-          break;
-
-        case ANTON:
-          if (l) todo = MODE;
-          if (r) reset_reveal();
-          break;
-
-        case TEXT:
-          if (l) todo = MODE;
-          if (r) __tr_freeze = !__tr_freeze;
-
-        default:
-          break;
-
-      }
-    }
-  }
-
-}
-
-
-//
-// ---------- MAIN ----------
-//
+// ---------- MAIN ---------- //
 
 // slider switch for mode selection inputs
 #define SWITCH_I2C  20
 #define SWITCH_SPI  21
 
+#define I2C_ADDRESS 0x32
+#define UART_SPEED  57600
+
 enum PROTOCOL { PROTOCOL_I2C, PROTOCOL_SPI, PROTOCOL_UART };
-static PROTOCOL proto;
+PROTOCOL proto;
 
 void setup() {
 
-  // initialize pseudorandom number
+  // initialize pseudorandom number for noise()
   // THIS IS NOT CRYPTOGRAPHICALLY SECURE
   randomSeed(analogRead(0));
   
@@ -277,30 +127,73 @@ void setup() {
   if (digitalRead(SWITCH_I2C) == LOW) {
 
     proto = PROTOCOL_I2C;
-    text("  I2C");
-    delay(1000);
-    Wire1.begin(0x32);
-    text("Adr32");
-    delay(1000);
-    memcpy(textbuf, "00000\0", 6);
+    text(" I2C ");
+    Wire1.begin(I2C_ADDRESS);
     Wire1.onReceive(i2c_receiver);
+
 
   } else if (digitalRead(SWITCH_SPI) == LOW) {
 
     proto = PROTOCOL_SPI;
-    text("  SPI");
+    text(" SPI ");
+    // use software spi
+    pinMode(13, INPUT_PULLUP);
+    pinMode(11, INPUT_PULLUP);
+    // enable pin change interrupt on PB5
+    PCICR  |= 0b00000001;
+    PCMSK0 |= 0b00100000;
 
   } else {
 
     proto = PROTOCOL_UART;
     text(" UART");
-    Serial.begin(57600);
+    Serial.begin(UART_SPEED);
     Serial.println("bubbledisp ready");
 
   }
-  delay(1000);
+
+}
 
 
+// this software SPI has sync problems!
+// maybe some other protocol than simple raw segments is needed
+// or a sync frame like in dotstars is necessary?
+volatile bool spiflag = false;
+volatile char spibuf = 0x00;
+volatile unsigned bit = 0;
+volatile char buf = 0;
+ISR(PCINT0_vect) {
+  // on rising edges
+  if (digitalRead(13) == HIGH) {
+    // shift buffer left
+    buf = buf << 1;
+    buf |= (digitalRead(11) == HIGH);
+    // sprintf(textbuf, "  %02d", bit);
+    // text(textbuf);
+    bit++;
+    if (bit == 8) {
+      spibuf = buf;
+      spiflag = true;
+      bit = 0;
+    }
+  }
+
+}
+
+void spi_receiver(char c) {
+  static unsigned position = 0;
+  static unsigned nullcounter = 0;
+  display[position] = c;
+  position++;
+  if (c == 0x00) {
+    if (nullcounter < 5)
+      nullcounter++;
+    else
+      // always keep position at 0 if more than five nulls received
+      position = 0;
+  } else {
+    nullcounter = 0;
+  }
 }
 
 void i2c_receiver(int howmany) {
@@ -319,32 +212,47 @@ void i2c_receiver(int howmany) {
 
   // otherwise decide by port what to do
   char port = Wire1.read();
-  unsigned int pos = 0;
+  unsigned position = 0;
   switch (port) {
 
     // write text to display
     default:
     case 0x00:
-      // send HELLO:  i2ctransfer -y 8 w6@0x32 0x00 $(python -c 'for c in "HELLO": print(f"0x{ord(c):02x}")')
+    case 0x01:
       while (Wire1.available()) {
-        textbuf[pos] = Wire1.read();
-        pos += 1;
+        char c = Wire1.read();
+        if (position < CATHODES) {
+          if (port == 0x00) {
+            // send HELLO:
+            // i2ctransfer -y <dev> w6@0x32 0x00 $(python -c 'for c in "HELLO": print(f"0x{ord(c):02x}")')
+            display[position] = lookup(c);
+          } else {
+            // send 'EƎ||EƎ':
+            // i2ctransfer -y <dev> w6@0x32 0x01 0x9e 0xf2 0x6c 0x9e 0xf2
+            display[position] = c;
+          }
+        }
+        position += 1;
       }
-      text(textbuf);
       break;
 
     // configure multiplexing rate
     case 0x12:
+      uint8_t val = Wire1.read();
+      if (val == 0) { val = 1; }
 #ifdef USE_TIMER_1
-      OCR1A = Wire1.read();
+      OCR1A = val;
 #else
-      OCR2A = Wire1.read();
+      OCR2A = val;
 #endif
       break;
 
   }
 
 }
+
+
+
 
 void loop() {
 
@@ -360,7 +268,10 @@ void loop() {
       break;
 
     default:
-      noise();
+      if (spiflag) {
+        spi_receiver(spibuf);
+        spiflag = false;
+      }
       break;
 
   }

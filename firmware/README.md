@@ -23,4 +23,4 @@ To compile and flash the firmware simply use the `upload` target. I'm using an
 Adafruit FT323H to program my chips. If you're using something different, you'll
 need to change the `upload_protocol = ...` in `platformio.ini` accordingly.
 
-    pio run -t upload
+    pio run -t program
