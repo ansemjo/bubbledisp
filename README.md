@@ -20,6 +20,9 @@ The hardware part is documented in [`hardware`](hardware/). Particularly, you
 can find the [schematic](hardware/schematic.pdf) and Gerber files there.
 The project was created with EasyEDA online.
 
+A compatible display can still be found on eBay. Search for "HP QDSP" or
+"bubble display".
+
 ![](hardware/pcbrender.png "a rendering of the top and bottom side of the PCB")
 
 The pullups R11 and R10 are optional if you don't want to use I2C or have external

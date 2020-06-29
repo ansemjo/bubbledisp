@@ -1,3 +1,6 @@
+// Copyright (c) 2020 Anton Semjonov
+// Licensed under the MIT License
+
 #pragma once
 #include <Arduino.h>
 #include "pinout.h"
