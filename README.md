@@ -140,3 +140,5 @@ A few more pictures:
 ![](images/pcb_order.jpg "PCBs and some parts as received from AISLER.")
 ![](images/assembled.jpg "My first assembled board with the bubble display.")
 ![](images/bubbl.jpg "A test showing the string 'bubbl' on the display.")
+![](images/shine_front.jpg "Pretty front side when shining light thorugh the board.")
+![](images/shine_back.jpg "Pretty back side when shining light thorugh the board.")
